@@ -100,6 +100,8 @@
   function dshort(iso) { const [, m, d] = iso.split('-'); return +d + ' ' + MONTHS[+m - 1]; }
   function dlong(iso) { return dshort(iso) + ' ' + iso.slice(0, 4); }
   function range(a, b) { return a.slice(0, 4) === b.slice(0, 4) ? `${dshort(a)} to ${dlong(b)}` : `${dlong(a)} to ${dlong(b)}`; }
+  // Keeps acronyms like CPA and ROAS intact when a label follows a number.
+  function lowerFirst(s) { return s ? s.charAt(0).toLowerCase() + s.slice(1) : s; }
   function plural(n, one, many) { return n === 1 ? one : many || one + 's'; }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 
@@ -455,7 +457,7 @@
           ${top.length ? `<ol class="top-actions">${top.map((f) => `<li>${pill(SEV, f.severity)}
               <div class="ta-main"><a class="ta-client clamp" href="#/client/${encodeURIComponent(f.clientId)}" title="${esc(f.clientName)}">${esc(f.clientName)}</a>
                 <span class="ta-title">${esc(f.title)}</span><span class="ta-do">${esc(f.action)}</span></div>
-              <div class="ta-impact">${f.impact ? `<span class="num">${money(f.impact, 0)}</span>${esc(f.impactLabel.toLowerCase())}` : ''}</div></li>`).join('')}</ol>`
+              <div class="ta-impact">${f.impact ? `<span class="num">${money(f.impact, 0)}</span>${esc(lowerFirst(f.impactLabel))}` : ''}</div></li>`).join('')}</ol>`
             : '<p class="muted">Nothing crossed a rule threshold this week.</p>'}
         </section>
 
@@ -536,7 +538,7 @@
         `<div class="filters" role="group" aria-label="Filter alerts">${btn('all', 'All', all.length)}${btn('crit', 'Critical', crit)}${btn('warn', 'Warning', warn)}</div>
         ${list.length ? `<ul class="alert-list">${list.map((a) => `<li class="alert ${a.severity}">
             <div class="alert-top">${pill(SEV, a.severity)}<a class="alert-client clamp" href="#/client/${encodeURIComponent(a.clientId)}" title="${esc(a.clientName)}">${esc(a.clientName)}</a>
-              ${a.impact ? `<span class="subtle">${money(a.impact, 0)} ${esc(a.impactLabel.toLowerCase())}</span>` : ''}</div>
+              ${a.impact ? `<span class="subtle">${money(a.impact, 0)} ${esc(lowerFirst(a.impactLabel))}</span>` : ''}</div>
             <h2>${esc(a.title)}</h2>
             <p class="action-why">${esc(a.why)}</p>
             <p class="action-do"><strong>Do this:</strong> ${esc(a.action)}</p>
