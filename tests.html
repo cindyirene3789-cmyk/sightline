@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engine tests | Sightline</title>
+<meta name="description" content="Automated checks for Sightline's rule-based insight engine and CSV import.">
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; max-width: 860px; padding: 24px 16px; color: #15191c; background: #fff; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  .summary { font-weight: 600; margin: 8px 0 20px; padding: 10px 14px; border-radius: 8px; }
+  .summary.ok { background: #e8f5ec; color: #14532d; }
+  .summary.bad { background: #fdecec; color: #7f1d1d; }
+  ol { padding-left: 24px; }
+  li { margin: 4px 0; }
+  .pass::marker { color: #15803d; }
+  .fail { color: #b91c1c; font-weight: 600; }
+  code { font-family: ui-monospace, monospace; font-size: 13px; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #111417; color: #e8ecef; }
+    .summary.ok { background: #16301f; color: #bdf0cf; }
+    .summary.bad { background: #3a1616; color: #ffc9c9; }
+    .fail { color: #f0787a; }
+  }
+</style>
+</head>
+<body>
+<h1>Sightline engine tests</h1>
+<p>Runs <code>engine.js</code> against fixed inputs. <a href="index.html">Back to the app</a></p>
+<div id="summary" class="summary" role="status">Running…</div>
+<ol id="list"></ol>
+
+<script src="engine.js?v=8"></script>
+<script>
+(function () {
+  const E = window.SightlineEngine;
+  const results = [];
+  function test(name, fn) {
+    try { fn(); results.push({ name, ok: true }); }
+    catch (e) { results.push({ name, ok: false, msg: e.message }); }
+  }
+  function eq(a, b, label) {
+    const A = JSON.stringify(a), B = JSON.stringify(b);
+    if (A !== B) throw new Error((label ? label + ': ' : '') + 'expected ' + B + ', got ' + A);
+  }
+  function ok(v, label) { if (!v) throw new Error(label || 'expected true'); }
+
+  // Builds 14 days of rows for one campaign. fn(dayIndex 0..13) returns overrides.
+  function series(clientId, campaign, end, fn, days) {
+    days = days || 14;
+    const endN = E.dayNum(end), out = [];
+    for (let i = 0; i < days; i++) {
+      const base = { spend: 100, impressions: 5000, clicks: 100, conversions: 5, revenue: 400 };
+      out.push(Object.assign({ clientId, platform: 'meta', campaign, date: E.isoFromDay(endN - days + 1 + i) }, base, fn ? fn(i) : {}));
+    }
+    return out;
+  }
+  const END = '2026-09-20', TODAY = '2026-09-21';
+  const db = (rows) => ({ clients: [{ id: 'c1', name: 'Test client' }], rows });
+  const run = (rows, opts) => E.analyze(db(rows), Object.assign({ today: TODAY }, opts)).clients[0];
+  const rules = (c) => c.findings.map((f) => f.rule);
+
+  /* parsing */
+  test('parseDate reads ISO dates', () => eq(E.parseDate('2026-09-01'), '2026-09-01'));
+  test('parseDate reads ISO with time', () => eq(E.parseDate('2026-09-01 00:00:00'), '2026-09-01'));
+  test('parseDate reads 01/09/2026 as day/month', () => eq(E.parseDate('01/09/2026'), '2026-09-01'));
+  test('parseDate flips to month/day when day > 12', () => eq(E.parseDate('09/13/2026'), '2026-09-13'));
+  test('parseDate reads "Sep 1, 2026"', () => eq(E.parseDate('Sep 1, 2026'), '2026-09-01'));
+  test('parseDate reads "1 Sept 2026"', () => eq(E.parseDate('1 Sept 2026'), '2026-09-01'));
+  test('parseDate rejects 31/02/2026 and text', () => { eq(E.parseDate('31/02/2026'), null); eq(E.parseDate('Total'), null); });
+  test('parseNumber strips S$, commas and %', () => { eq(E.parseNumber('S$1,234.50'), 1234.5); eq(E.parseNumber('12.5%'), 12.5); });
+  test('parseNumber treats -- and blank as 0', () => { eq(E.parseNumber('--'), 0); eq(E.parseNumber(''), 0); });
+  test('parseNumber returns null for text', () => eq(E.parseNumber('abc'), null));
+  test('pctChange handles zero baseline', () => { eq(E.pctChange(10, 0), null); ok(Math.abs(E.pctChange(12, 10) - 0.2) < 1e-9, '12 vs 10 is +20%'); });
+
+  /* platform detection */
+  test('detects Meta Ads', () => eq(E.detectPlatform(['Day', 'Campaign name', 'Amount spent (SGD)', 'Impressions', 'Link clicks']), 'meta'));
+  test('detects Google Ads', () => eq(E.detectPlatform(['Day', 'Campaign', 'Cost', 'Impr.', 'Clicks', 'Conversions', 'Conv. value']), 'google'));
+  test('detects TikTok Ads', () => eq(E.detectPlatform(['Date', 'Campaign name', 'Cost', 'Impressions', 'Clicks (destination)']), 'tiktok'));
+  test('detects Shopee Ads', () => eq(E.detectPlatform(['Date', 'Ad Name', 'Expense', 'Impressions', 'GMV']), 'shopee'));
+  test('detects Lazada Ads', () => eq(E.detectPlatform(['Date', 'Campaign Name', 'Spend', 'Orders', 'Store Revenue']), 'lazada'));
+  test('detects LinkedIn Ads', () => eq(E.detectPlatform(['Start Date (in UTC)', 'Campaign Name', 'Total Spent', 'Impressions']), 'linkedin'));
+  test('falls back to Other CSV', () => eq(E.detectPlatform(['date', 'spend']), 'csv'));
+
+  /* column matching */
+  test('matches Google Ads columns', () => {
+    const m = E.matchColumns(['Day', 'Campaign', 'Cost', 'Impr.', 'Clicks', 'Conversions', 'Conv. value']);
+    eq(m, { date: 0, campaign: 1, spend: 2, impressions: 3, clicks: 4, conversions: 5, revenue: 6 });
+  });
+  test('matches Meta columns including currency suffix', () => {
+    const m = E.matchColumns(['Day', 'Campaign name', 'Amount spent (SGD)', 'Impressions', 'Link clicks', 'Purchases', 'Purchases conversion value']);
+    eq([m.date, m.spend, m.clicks, m.conversions, m.revenue], [0, 2, 4, 5, 6]);
+  });
+  test('finds header row below title rows', () => {
+    eq(E.findHeaderRow([['Campaign report'], ['1 Sep 2026 - 14 Sep 2026'], ['Day', 'Campaign', 'Cost', 'Impr.']]), 2);
+  });
+
+  /* buildImport */
+  test('empty file gives the empty error', () => eq(E.buildImport([]).error, 'empty'));
+  test('blank-line file gives the empty error', () => eq(E.buildImport([[''], ['', '']]).error, 'empty'));
+  test('missing date column gives nodate', () => eq(E.buildImport([['Campaign', 'Cost', 'Clicks'], ['A', '10', '2']]).error, 'nodate'));
+  test('unreadable dates give baddates', () => eq(E.buildImport([['Day', 'Cost', 'Clicks'], ['soon', '10', '2']]).error, 'baddates'));
+  test('total rows are skipped and rows aggregate', () => {
+    const r = E.buildImport([['Report'], ['Day', 'Campaign', 'Cost', 'Clicks'], ['2026-09-01', 'A', '10', '1'], ['2026-09-01', 'A', '5', '1'], ['Total', '', '15', '2']]);
+    ok(r.ok, 'import ok'); eq(r.records.length, 1); eq(r.records[0].spend, 15); eq(r.skipped, 1);
+  });
+  test('currency is read from headers', () => eq(E.buildImport([['Day', 'Amount spent (USD)'], ['2026-09-01', '3']]).currency, 'USD'));
+
+  /* upsert */
+  test('re-importing the same rows updates instead of duplicating', () => {
+    const d = { rows: [] };
+    const recs = [{ date: '2026-09-01', campaign: 'A', spend: 1, impressions: 0, clicks: 0, conversions: 0, revenue: 0 }];
+    eq(E.upsertRows(d, recs, 'c1', 'meta', 'i1'), { added: 1, updated: 0 });
+    eq(E.upsertRows(d, recs, 'c1', 'meta', 'i2'), { added: 0, updated: 1 });
+    eq(d.rows.length, 1);
+  });
+
+  /* analyze rules */
+  test('steady data is healthy with no findings', () => {
+    const c = run(series('c1', 'A', END));
+    eq(c.status, 'good'); eq(rules(c), []);
+  });
+  test('CPA up 50% is critical', () => {
+    // spend +50% with flat conversions fires spendUp; CPA +50% is critical, so it still fires too
+    const c = run(series('c1', 'A', END, (i) => (i >= 7 ? { spend: 150 } : {})));
+    ok(rules(c).includes('cpaUp'), 'cpaUp fired'); eq(c.status, 'risk');
+  });
+  test('CPA up 25% with flat spend is a warning', () => {
+    const c = run(series('c1', 'A', END, (i) => (i >= 7 ? { conversions: 4 } : {})));
+    const f = c.findings.find((x) => x.rule === 'cpaUp');
+    ok(f, 'cpaUp fired'); eq(f.severity, 'warn');
+  });
+  test('low conversion volume skips the CPA rule', () => {
+    const c = run(series('c1', 'A', END, (i) => ({ conversions: i >= 7 ? 0.4 : 0.6 })));
+    ok(!rules(c).includes('cpaUp'), 'no cpaUp');
+  });
+  test('spend up with flat conversions fires spendUp, not a CPA warning', () => {
+    const c = run(series('c1', 'A', END, (i) => (i >= 7 ? { spend: 130 } : {})));
+    ok(rules(c).includes('spendUp'), 'spendUp'); ok(!rules(c).includes('cpaUp'), 'cpaUp suppressed');
+  });
+  test('tracking break is critical and suppresses CPA', () => {
+    const c = run(series('c1', 'A', END, (i) => (i >= 11 ? { conversions: 0, revenue: 0 } : {})), {});
+    eq(c.findings[0].rule, 'tracking'); eq(c.status, 'risk'); ok(!rules(c).includes('cpaUp'), 'no cpaUp');
+  });
+  test('CTR down 20% fires ctrDown', () => {
+    const c = run(series('c1', 'A', END, (i) => (i >= 7 ? { clicks: 80 } : {})));
+    ok(rules(c).includes('ctrDown'));
+  });
+  test('ROAS down 40% is critical', () => {
+    const c = run(series('c1', 'A', END, (i) => (i >= 7 ? { revenue: 240 } : {})));
+    const f = c.findings.find((x) => x.rule === 'roasDown');
+    ok(f, 'roasDown'); eq(f.severity, 'crit');
+  });
+  test('spend down 50% fires spendDrop', () => {
+    const c = run(series('c1', 'A', END, (i) => (i >= 7 ? { spend: 50 } : {})));
+    ok(rules(c).includes('spendDrop'));
+  });
+  test('improved CPA fires winner as an opportunity', () => {
+    const c = run(series('c1', 'A', END, (i) => (i >= 7 ? { conversions: 7 } : {})));
+    const f = c.findings.find((x) => x.rule === 'winner');
+    ok(f, 'winner'); eq(f.severity, 'good'); eq(c.status, 'good');
+  });
+  test('a campaign CPA jump inside steady totals is flagged', () => {
+    const big = series('c1', 'Big', END, () => ({ spend: 400, conversions: 40, impressions: 20000, clicks: 400, revenue: 1600 }));
+    const small = series('c1', 'Small', END, (i) => (i >= 7 ? { conversions: 3 } : {})).map((r) => Object.assign(r, { platform: 'google' }));
+    const c = run(big.concat(small));
+    const f = c.findings.find((x) => x.rule === 'campaignCpaUp');
+    ok(f, 'campaignCpaUp fired: ' + rules(c)); eq(f.driver, 'Small'); ok(!rules(c).includes('cpaUp'), 'client CPA stayed under threshold');
+  });
+  test('tiny campaigns are not flagged on their own', () => {
+    const big = series('c1', 'Big', END, () => ({ spend: 2000, conversions: 200, impressions: 90000, clicks: 1800, revenue: 8000 }));
+    const small = series('c1', 'Small', END, (i) => (i >= 7 ? { conversions: 3 } : {}));
+    ok(!rules(run(big.concat(small))).includes('campaignCpaUp'));
+  });
+  test('old data is flagged stale', () => {
+    const c = run(series('c1', 'A', END), { today: '2026-10-15' });
+    ok(rules(c).includes('stale')); eq(c.status, 'watch');
+  });
+  test('one week of data pauses comparisons', () => {
+    const c = run(series('c1', 'A', END, null, 7));
+    eq(rules(c), ['onlyOneWeek']); eq(c.status, 'good');
+  });
+  test('every finding carries evidence', () => {
+    const r = E.analyze(E.buildDemo('2026-09-25'), { today: '2026-09-26' });
+    ok(r.actions.every((f) => f.evidence.length >= 2 && f.why && f.action));
+  });
+  test('analyze does not change its input', () => {
+    const d = db(series('c1', 'A', END));
+    const before = JSON.stringify(d);
+    E.analyze(d, { today: TODAY });
+    eq(JSON.stringify(d), before);
+  });
+  test('agency ROAS ignores clients without revenue', () => {
+    const rows = series('c1', 'A', END).concat(series('c2', 'B', END, () => ({ revenue: 0 })));
+    const r = E.analyze({ clients: [{ id: 'c1', name: 'One' }, { id: 'c2', name: 'Two' }], rows }, { today: TODAY });
+    ok(Math.abs(r.totals.this.roas - 4) < 1e-9, 'ROAS should be 4, got ' + r.totals.this.roas);
+  });
+  test('titles never pair up/down with a sign', () => {
+    const r = E.analyze(E.buildDemo('2026-09-25'), { today: '2026-09-26' });
+    ok(r.actions.every((f) => !/(up|down) [+\u2212-]/.test(f.title)), r.actions.map((f) => f.title).join(' | '));
+  });
+  test('demo data shows at-risk, watch and healthy clients', () => {
+    const r = E.analyze(E.buildDemo('2026-09-25'), { today: '2026-09-26' });
+    ok(r.counts.risk >= 1 && r.counts.watch >= 1 && r.counts.good >= 1, JSON.stringify(r.counts));
+  });
+  test('demo data is the same on any date', () => {
+    const a = E.analyze(E.buildDemo('2026-09-25'), { today: '2026-09-26' }).counts;
+    const b = E.analyze(E.buildDemo('2027-03-01'), { today: '2027-03-02' }).counts;
+    eq(a, b);
+  });
+
+  const list = document.getElementById('list');
+  const failed = results.filter((r) => !r.ok);
+  for (const r of results) {
+    const li = document.createElement('li');
+    li.className = r.ok ? 'pass' : 'fail';
+    li.textContent = (r.ok ? 'Pass: ' : 'Fail: ') + r.name + (r.ok ? '' : ' (' + r.msg + ')');
+    list.appendChild(li);
+  }
+  const s = document.getElementById('summary');
+  s.className = 'summary ' + (failed.length ? 'bad' : 'ok');
+  s.textContent = failed.length ? `${failed.length} of ${results.length} tests failed.` : `All ${results.length} tests passed.`;
+  window.__testResults = { total: results.length, failed: failed.map((f) => f.name + ': ' + f.msg) };
+})();
+</script>
+</body>
+</html>
