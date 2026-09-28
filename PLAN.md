@@ -59,3 +59,37 @@ A client's health is **At risk** if any finding is critical, **Watch** if any is
 - [x] 7. Alerts and printable report. *Verify:* the badge count matches the list, and print preview is clean.
 - [x] 8. Settings. *Verify:* rename works, reset and delete use in-page confirmation.
 - [x] Final: 375, 768 and 1440 in light and dark, no sideways scroll, clean console, contrast ratios, README.
+
+---
+
+# Round 2: features adapted from agency tools (2026-09-28)
+
+Scope was confirmed by Cindy: all eight features below. The constraints haven't changed: still static, free, no login, and data stays in the browser. Live account connections, scheduled emails, Slack alerts, share links and AI write-ups stay out of scope because they need a backend.
+
+## Data model additions (same key `sightline-db-v1`, all fields optional so older saves still load)
+
+```
+settings: { period: 'w7'|'d14'|'d30'|'mtd', thresholds: {…agency overrides}, logo: dataURL|null, brandColor: '#rrggbb'|null }
+clients[i].budget:     { monthly, targetCpa, targetRoas }   // numbers or null
+clients[i].thresholds: { cpaUpWarn, cpaUpCrit, roasDownWarn, roasDownCrit }  // per-client overrides
+notes: [{ id, clientId, date, text, createdAt }]
+```
+
+Threshold order: built-in defaults, then agency overrides, then client overrides.
+
+## Steps
+
+- [x] A1. Periods: last 7, 14 or 30 days vs the period before, or this month to date vs the same days last month. Rule text uses period labels, not "this week". A comparison needs a full previous period. *Verify:* tests for each period's date boundaries.
+- [x] A2. Threshold overrides (agency, then client). *Verify:* tests that an override changes whether a rule fires.
+- [x] A3. Channel breakdown per client and agency-wide: spend share, CPA and ROAS per platform. *Verify:* shares add up to 100%.
+- [x] A4. Change breakdown: spend and conversion change per platform and campaign (these add up exactly), plus the counterfactual "CPA if this segment hadn't changed". *Verify:* tests with known numbers.
+- [x] A5. Budgets and targets: month-to-date spend, projected month-end, over/under pace warnings, budget already exceeded (critical), and CPA/ROAS target misses. *Verify:* tests.
+- [x] A6. Data health: missing days, a platform that stopped sending data, no revenue tracked, no conversions tracked. Kept separate from performance status. *Verify:* tests.
+- [x] A7. Demo: 70 days of data, budgets and targets on some clients, a few notes, one data gap. *Verify:* the demo still shows at-risk, watch and healthy clients.
+- [x] B1. Period selector on the overview, client page and report, saved in settings.
+- [x] B2. Overview: pacing column, agency channel table, data-issues link.
+- [x] B3. Client page: budget and targets form plus pacing bar, channels table, change breakdown (platform or campaign toggle), notes (add, delete with in-page confirm), note markers on charts.
+- [x] B4. Settings: alert rules editor with validation (warning below critical, sensible ranges) and a reset option; branding (logo upload of 200 KB or less as PNG, JPG, WebP or SVG, plus brand colour).
+- [x] B5. Report: logo, brand colour, pacing, channels, notes for the period. Print keeps the brand colour.
+- [x] B6. Import page: data health section.
+- [x] C. Verify: tests, every screen at 375, 768 and 1440 in light and dark, print, overflow audit, console, old save loads, redeploy.

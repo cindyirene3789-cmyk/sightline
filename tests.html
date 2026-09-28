@@ -30,7 +30,7 @@
 <div id="summary" class="summary" role="status">Running…</div>
 <ol id="list"></ol>
 
-<script src="engine.js?v=8"></script>
+<script src="engine.js?v=14"></script>
 <script>
 (function () {
   const E = window.SightlineEngine;
@@ -178,7 +178,7 @@
   });
   test('one week of data pauses comparisons', () => {
     const c = run(series('c1', 'A', END, null, 7));
-    eq(rules(c), ['onlyOneWeek']); eq(c.status, 'good');
+    eq(rules(c), ['noComparison']); eq(c.status, 'good');
   });
   test('every finding carries evidence', () => {
     const r = E.analyze(E.buildDemo('2026-09-25'), { today: '2026-09-26' });
@@ -199,6 +199,137 @@
     const r = E.analyze(E.buildDemo('2026-09-25'), { today: '2026-09-26' });
     ok(r.actions.every((f) => !/(up|down) [+\u2212-]/.test(f.title)), r.actions.map((f) => f.title).join(' | '));
   });
+  /* periods */
+  test('7, 14 and 30 day periods compare equal-length windows', () => {
+    const end = E.dayNum('2026-09-25');
+    for (const [k, n] of [['w7', 7], ['d14', 14], ['d30', 30]]) {
+      const b = E.periodBounds(k, end);
+      eq([b.thisEnd - b.thisStart + 1, b.lastEnd - b.lastStart + 1, b.thisStart - b.lastEnd], [n, n, 1], k);
+    }
+  });
+  test('month to date compares the same days last month', () => {
+    const b = E.periodBounds('mtd', E.dayNum('2026-09-25'));
+    eq([E.isoFromDay(b.thisStart), E.isoFromDay(b.lastStart), E.isoFromDay(b.lastEnd)], ['2026-09-01', '2026-08-01', '2026-08-25']);
+  });
+  test('month to date never runs past the end of a shorter month', () => {
+    const b = E.periodBounds('mtd', E.dayNum('2027-03-31'));
+    eq(E.isoFromDay(b.lastEnd), '2027-02-28');
+  });
+  test('a 14-day comparison needs 28 days of history', () => {
+    eq(rules(run(series('c1', 'A', END, null, 21), { period: 'd14' })), ['noComparison']);
+  });
+  test('rule text follows the chosen period', () => {
+    const c = run(series('c1', 'A', END, (i) => (i >= 14 ? { conversions: 4 } : {}), 28), { period: 'd14' });
+    const f = c.findings.find((x) => x.rule === 'cpaUp');
+    ok(f && f.why.includes('in the last 14 days') && !/week/.test(f.why + f.impactLabel), f && f.why);
+  });
+
+  /* threshold overrides */
+  test('agency overrides can switch a rule off', () => {
+    const rows = series('c1', 'A', END, (i) => (i >= 7 ? { conversions: 4 } : {}));
+    ok(rules(run(rows)).includes('cpaUp'), 'fires by default');
+    const r = E.analyze({ clients: [{ id: 'c1', name: 'T' }], rows, settings: { thresholds: { cpaUpWarn: 0.3, cpaUpCrit: 0.5 } } }, { today: TODAY });
+    ok(!rules(r.clients[0]).includes('cpaUp'), 'off at 30%');
+  });
+  test('client overrides beat agency overrides', () => {
+    const rows = series('c1', 'A', END, (i) => (i >= 7 ? { conversions: 4 } : {}));
+    const r = E.analyze({ clients: [{ id: 'c1', name: 'T', thresholds: { cpaUpWarn: 0.1, cpaUpCrit: 0.2 } }], rows,
+      settings: { thresholds: { cpaUpWarn: 0.3, cpaUpCrit: 0.5 } } }, { today: TODAY });
+    const f = r.clients[0].findings.find((x) => x.rule === 'cpaUp');
+    ok(f, 'fires'); eq(f.severity, 'crit'); eq(r.clients[0].customRules, true);
+  });
+  test('stored overrides ignore unknown keys, text and negatives', () => {
+    eq(E.cleanThresholds({ cpaUpWarn: 0.3, cpaUpCrit: '0.5', roasDownWarn: -1, hack: 2 }), { cpaUpWarn: 0.3 });
+  });
+  test('threshold validation catches bad ranges and warning above critical', () => {
+    const e = E.validateThresholds(Object.assign({}, E.THRESHOLDS, { cpaUpWarn: 0.5, cpaUpCrit: 0.4, staleDays: 0 }));
+    ok(e.cpaUpCrit && e.staleDays, JSON.stringify(e));
+    eq(E.validateThresholds(Object.assign({}, E.THRESHOLDS)), {});
+  });
+  test('custom thresholds read cleanly in rule text', () => {
+    const rows = series('c1', 'A', END, (i) => (i >= 7 ? { conversions: 4 } : {}));
+    const r = E.analyze({ clients: [{ id: 'c1', name: 'T' }], rows, settings: { thresholds: { cpaUpWarn: 0.15 } } }, { today: TODAY });
+    const rule = r.clients[0].findings.find((x) => x.rule === 'cpaUp').evidence.find((x) => x[0] === 'Rule')[1];
+    ok(rule.includes('15%') && !rule.includes('0000'), rule);
+  });
+
+  /* channels and change breakdown */
+  test('channel spend shares add up to 100%', () => {
+    const rows = series('c1', 'A', END).concat(series('c1', 'B', END, () => ({ spend: 300 })).map((r) => Object.assign(r, { platform: 'google' })));
+    const c = run(rows);
+    ok(Math.abs(c.channels.reduce((a, x) => a + x.shareOfSpend, 0) - 1) < 1e-9); eq(c.channels[0].platform, 'google');
+  });
+  test('change breakdown finds the segment that moved CPA', () => {
+    const rows = series('c1', 'Steady', END).concat(series('c1', 'Worse', END, (i) => (i >= 7 ? { conversions: 2.5 } : {})));
+    const d = run(rows).drivers.byCampaign;
+    const worse = d.find((x) => x.label === 'Worse'), steady = d.find((x) => x.label === 'Steady');
+    eq(d[0].label, 'Worse');
+    ok(Math.abs(worse.cpaWithout - 20) < 1e-9 && worse.cpaEffect > 0, JSON.stringify(worse));
+    ok(Math.abs(steady.cpaEffect) < 1e-9, JSON.stringify(steady));
+  });
+  test('spend and conversion changes add up to the client total', () => {
+    const rows = series('c1', 'A', END, (i) => (i >= 7 ? { spend: 130, conversions: 6 } : {})).concat(series('c1', 'B', END, (i) => (i >= 7 ? { spend: 80, conversions: 3 } : {})));
+    const c = run(rows);
+    const sum = (k) => c.drivers.byCampaign.reduce((a, x) => a + x[k], 0);
+    ok(Math.abs(sum('dSpend') - (c.kpis.this.spend - c.kpis.last.spend)) < 1e-9 && Math.abs(sum('dConv') - (c.kpis.this.conversions - c.kpis.last.conversions)) < 1e-9);
+  });
+
+  /* budgets and targets */
+  const withBudget = (budget, end, days) => E.analyze({ clients: [{ id: 'c1', name: 'T', budget }], rows: series('c1', 'A', end || END, null, days || 20) }, { today: TODAY }).clients[0];
+  test('pacing projects month-end spend', () => {
+    const c = withBudget({ monthly: 3000 });
+    eq([c.pacing.mtd, c.pacing.projected, c.pacing.status], [2000, 3000, 'on']);
+  });
+  test('pacing warns about overspend and underspend', () => {
+    ok(rules(withBudget({ monthly: 2500 })).includes('overPace'), 'over');
+    ok(rules(withBudget({ monthly: 4000 })).includes('underPace'), 'under');
+  });
+  test('a budget already spent is critical', () => {
+    const c = withBudget({ monthly: 1500 });
+    eq(c.findings[0].rule, 'budgetExceeded'); eq(c.status, 'risk');
+  });
+  test('no pace warnings in the first days of a month', () => {
+    const c = withBudget({ monthly: 500 }, '2026-10-03', 20);
+    ok(!rules(c).includes('overPace'), rules(c).join()); eq(c.pacing.status, 'early');
+  });
+  test('missing a CPA target by 33% is critical', () => {
+    const f = withBudget({ targetCpa: 15 }).findings.find((x) => x.rule === 'cpaTarget');
+    ok(f, 'fires'); eq(f.severity, 'crit');
+    ok(!rules(withBudget({ targetCpa: 19 })).includes('cpaTarget'), 'within 10% is fine');
+  });
+  test('missing a ROAS target by 20% is a warning', () => {
+    const f = withBudget({ targetRoas: 5 }).findings.find((x) => x.rule === 'roasTarget');
+    ok(f, 'fires'); eq(f.severity, 'warn');
+  });
+
+  /* data health */
+  test('data health finds missing days and platforms that stopped', () => {
+    const rows = series('c1', 'A', END).filter((r) => !['2026-09-10', '2026-09-11'].includes(r.date))
+      .concat(series('c1', 'B', '2026-09-15', null, 9).map((r) => Object.assign(r, { platform: 'google' })));
+    const c = run(rows);
+    const kinds = c.dataIssues.map((x) => x.platform + ':' + x.kind).sort();
+    eq(kinds, ['google:stopped', 'meta:gap']);
+    ok(c.dataIssues.find((x) => x.kind === 'gap').title.includes('2 days'));
+  });
+  test('data health notes missing revenue and missing conversions', () => {
+    eq(run(series('c1', 'A', END, () => ({ revenue: 0 }))).dataIssues.map((x) => x.kind), ['noRevenue']);
+    eq(run(series('c1', 'A', END, () => ({ conversions: 0, revenue: 0 }))).dataIssues.map((x) => x.kind), ['noConversions']);
+  });
+  test('data issues do not change a client’s health status', () => {
+    const c = run(series('c1', 'A', END, () => ({ revenue: 0 })));
+    eq(c.status, 'good');
+  });
+  test('a tracking break leads even when another critical finding costs more', () => {
+    const rows = series('c1', 'A', '2026-09-20', (i) => (i >= 17 ? { conversions: 0, revenue: 0 } : {}), 20);
+    const c = E.analyze({ clients: [{ id: 'c1', name: 'T', budget: { monthly: 1000 } }], rows }, { today: TODAY }).clients[0];
+    eq(c.findings.map((x) => x.rule).slice(0, 2), ['tracking', 'budgetExceeded']);
+  });
+  test('demo includes notes, budgets and a data gap', () => {
+    const d = E.buildDemo('2026-09-25');
+    const r = E.analyze(d, { today: '2026-09-26' });
+    ok(d.notes.length >= 3 && r.clients.some((c) => c.pacing) && r.dataIssues.some((x) => x.kind === 'gap'));
+  });
+
   test('demo data shows at-risk, watch and healthy clients', () => {
     const r = E.analyze(E.buildDemo('2026-09-25'), { today: '2026-09-26' });
     ok(r.counts.risk >= 1 && r.counts.watch >= 1 && r.counts.good >= 1, JSON.stringify(r.counts));
