@@ -1197,7 +1197,7 @@
                 <span class="num">${brand ? brand.toUpperCase() : 'Not set'}</span>
                 ${brand ? '<button type="button" class="btn btn-ghost" id="brand-reset" data-action="brand-reset">Reset colour</button>' : ''}
               </div>
-              <p class="hint">Used for the accent rule at the top of each report. Text stays black for readability.</p>
+              <p class="hint">Used for the rule under each report’s heading. Text stays black for readability.</p>
               ${formMsg('brand')}
             </div>
           </section>
